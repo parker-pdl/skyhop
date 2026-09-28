@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<link rel="manifest" href="manifest.json">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#1b2a49">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Skyhop">
+<meta name="description" content="Skyhop by Parker Data Link. Tap to hop through the sky towers. One touch, endless tries.">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<title>Skyhop by Parker Data Link</title>
+
+<!-- Google AdSense (web only). Inside the Android app the native shell
+     injects window.GameAds and ads come from the AdMob SDK instead. -->
+<script>
+if (!window.GameAds) {
+    var s = document.createElement("script");
+    s.async = true;
+    s.crossOrigin = "anonymous";
+    s.src = "https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=ca-pub-2328685696786328";
+    document.head.appendChild(s);
+}
+</script>
+
+<style>
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #1b2a49; overflow: hidden;
+    touch-action: none; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none;
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+}
+#wrap {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+}
+canvas { display: block; image-rendering: auto; }
+#foot {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom));
+    text-align: center; font-size: 11px; color: #9fb3d9;
+    pointer-events: none;
+}
+#foot a { color: #cfe0ff; pointer-events: auto; text-decoration: none; }
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="game"></canvas></div>
+<div id="foot"><a href="https://parkerdatalink.com" target="_blank" rel="noopener">Parker Data Link</a> &nbsp;·&nbsp; <a href="privacy.html" target="_blank" rel="noopener">Privacy</a></div>
+
+<script>
+(function () {
+"use strict";
+
+/* =========================================================
+   Skyhop - a one-touch sky hopping game.
+   Logical canvas is 360 x 640 and scales to fit the screen.
+   All art is drawn in code. No image files.
+   ========================================================= */
+
+var W = 360, H = 640;
+var GROUND_H = 72;
+var GRAVITY = 1650;
+var FLAP_VY = -430;
+var MAX_FALL = 620;
+var TOWER_W = 64;
+var GAP_START = 168;
+var GAP_MIN = 138;
+var SPEED_START = 150;
+var SPEED_MAX = 235;
+var SPACING = 224;
+
+var canvas = document.getElementById("game");
+var ctx = canvas.getContext("2d");
+var dpr = 1, scale = 1;
+
+function resize() {
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var footH = 26;
+    var availH = Math.max(200, vh - footH);
+    // Fill the screen: keep width 360 and let the logical height follow
+    // the device shape (tall phones get more sky, never black bars).
+    H = Math.round(Math.max(560, Math.min(860, W * availH / vw)));
+    scale = Math.min(vw / W, availH / H);
+    dpr = Math.min(window.devicePixelRatio || 1, 3);
+    canvas.style.width = Math.floor(W * scale) + "px";
+    canvas.style.height = Math.floor(H * scale) + "px";
+    canvas.width = Math.floor(W * scale * dpr);
+    canvas.height = Math.floor(H * scale * dpr);
+}
+window.addEventListener("resize", resize);
+resize();
+
+/* ---------------- sound (synthesised, no files) ---------------- */
+var AC = window.AudioContext || window.webkitAudioContext;
+var audio = null;
+var muted = false;
+try { muted = localStorage.getItem("skyhop.muted") === "1"; } catch (e) {}
+
+function ensureAudio() {
+    if (!AC) return;
+    if (!audio) { try { audio = new AC(); } catch (e) { audio = null; } }
+    if (audio && audio.state === "suspended") audio.resume();
+}
+function tone(freq, dur, type, vol, slide) {
+    if (muted || !audio) return;
+    try {
+        var o = audio.createOscillator(), g = audio.createGain();
+        var t = audio.currentTime;
+        o.type = type || "square";
+        o.frequency.setValueAtTime(freq, t);
+        if (slide) o.frequency.exponentialRampToValueAtTime(slide, t + dur);
+        g.gain.setValueAtTime(vol || 0.08, t);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        o.connect(g); g.connect(audio.destination);
+        o.start(t); o.stop(t + dur + 0.02);
+    } catch (e) {}
+}
+var sfx = {
+    flap: function () { tone(520, 0.09, "triangle", 0.10, 780); },
+    score: function () { tone(880, 0.07, "square", 0.06); setTimeout(function () { tone(1320, 0.10, "square", 0.06); }, 60); },
+    hit: function () { tone(160, 0.25, "sawtooth", 0.12, 60); },
+    fall: function () { tone(400, 0.5, "triangle", 0.08, 90); }
+};
+
+/* ---------------- state ---------------- */
+var STATE = { TITLE: 0, PLAY: 1, DEAD: 2 };
+var state = STATE.TITLE;
+var best = 0;
+try { best = parseInt(localStorage.getItem("skyhop.best") || "0", 10) || 0; } catch (e) {}
+var score = 0, newBest = false;
+var hopper, towers, groundX, cloudsFar, cloudsNear, hills, speed, gap, spawnX, deadAt, titleT;
+var rng = Math.random;
+
+function makeClouds(n, yMin, yMax, sMin, sMax) {
+    var a = [];
+    for (var i = 0; i < n; i++) a.push({
+        x: rng() * (W + 200) - 100, y: yMin + rng() * (yMax - yMin),
+        s: sMin + rng() * (sMax - sMin)
+    });
+    return a;
+}
+function makeHills() {
+    var a = [];
+    for (var i = 0; i < 9; i++) a.push({ x: i * 90 + rng() * 30, h: 40 + rng() * 55, w: 110 + rng() * 60 });
+    return a;
+}
+
+function reset() {
+    hopper = { x: 96, y: H * 0.42, vy: 0, r: 15, rot: 0, wing: 0, wingT: 0 };
+    towers = [];
+    groundX = 0;
+    if (!cloudsFar) { cloudsFar = makeClouds(6, 40, 260, 0.5, 0.8); cloudsNear = makeClouds(4, 60, 320, 0.9, 1.3); hills = makeHills(); }
+    speed = SPEED_START;
+    gap = GAP_START;
+    spawnX = W + 60;
+    score = 0; newBest = false;
+    deadAt = 0; titleT = 0;
+}
+reset();
+
+function spawnTower() {
+    var top = 70, bottom = H - GROUND_H - 70;
+    var gapY = top + gap / 2 + rng() * (bottom - top - gap);
+    // keep consecutive gaps reachable: no more than a third of the screen apart
+    if (towers.length) {
+        var prev = towers[towers.length - 1].gapY, maxJump = H * 0.34;
+        gapY = Math.max(top + gap / 2, Math.min(bottom - gap / 2, Math.max(prev - maxJump, Math.min(prev + maxJump, gapY))));
+    }
+    towers.push({ x: spawnX, gapY: gapY, gap: gap, passed: false, tint: rng() < 0.5 ? 0 : 1 });
+    spawnX += SPACING;
+}
+
+function start() {
+    reset();
+    state = STATE.PLAY;
+    hopper.vy = FLAP_VY;
+    spawnX = W + 120;
+    spawnTower(); spawnTower(); spawnTower();
+}
+
+function die() {
+    if (state !== STATE.PLAY) return;
+    state = STATE.DEAD;
+    deadAt = now();
+    sfx.hit();
+    setTimeout(function () { if (state === STATE.DEAD) sfx.fall(); }, 120);
+    if (score > best) { best = score; newBest = true; try { localStorage.setItem("skyhop.best", String(best)); } catch (e) {} }
+    /* Android app: the round is over, the native shell may show an interstitial. */
+    if (window.GameAds && window.GameAds.roundEnded) { try { window.GameAds.roundEnded(); } catch (e) {} }
+}
+
+function flap() {
+    ensureAudio();
+    if (state === STATE.TITLE) { start(); sfx.flap(); return; }
+    if (state === STATE.PLAY) {
+        hopper.vy = FLAP_VY; hopper.wingT = 0.18; sfx.flap();
+        return;
+    }
+    if (state === STATE.DEAD && now() - deadAt > 600) { start(); sfx.flap(); }
+}
+
+/* ---------------- input ---------------- */
+function onPointer(e) {
+    if (e.target && e.target.tagName === "A") return;
+    e.preventDefault();
+    // mute button hit-test (top-right)
+    if (e.clientX !== undefined) {
+        var r = canvas.getBoundingClientRect();
+        var lx = (e.clientX - r.left) / scale, ly = (e.clientY - r.top) / scale;
+        if (lx > W - 52 && ly < 52) { toggleMute(); return; }
+    }
+    flap();
+}
+canvas.addEventListener("pointerdown", onPointer);
+window.addEventListener("keydown", function (e) {
+    if (e.code === "Space" || e.code === "ArrowUp" || e.code === "Enter") { e.preventDefault(); flap(); }
+    if (e.code === "KeyM") toggleMute();
+});
+function toggleMute() {
+    muted = !muted;
+    try { localStorage.setItem("skyhop.muted", muted ? "1" : "0"); } catch (e) {}
+}
+document.addEventListener("visibilitychange", function () {
+    if (document.hidden && state === STATE.PLAY) { paused = true; }
+});
+var paused = false;
+
+/* ---------------- update ---------------- */
+function now() { return performance.now(); }
+var last = now();
+
+function update(dt) {
+    titleT += dt;
+    var scroll = (state === STATE.DEAD) ? 0 : speed * dt;
+
+    groundX = (groundX - scroll) % 48;
+    for (var i = 0; i < cloudsFar.length; i++) { var c = cloudsFar[i]; c.x -= scroll * 0.15; if (c.x < -140) { c.x = W + 60; c.y = 40 + rng() * 220; } }
+    for (i = 0; i < cloudsNear.length; i++) { c = cloudsNear[i]; c.x -= scroll * 0.35; if (c.x < -180) { c.x = W + 80; c.y = 60 + rng() * 260; } }
+    for (i = 0; i < hills.length; i++) { var h = hills[i]; h.x -= scroll * 0.5; if (h.x + h.w < -20) h.x += hills.length * 90 + 20; }
+
+    if (state === STATE.TITLE) {
+        hopper.y = H * 0.42 + Math.sin(titleT * 3) * 8;
+        hopper.rot = Math.sin(titleT * 3) * 0.12;
+        hopper.wingT -= dt; if (hopper.wingT < -0.25) hopper.wingT = 0.18;
+        return;
+    }
+
+    // hopper physics
+    hopper.vy = Math.min(hopper.vy + GRAVITY * dt, MAX_FALL);
+    hopper.y += hopper.vy * dt;
+    hopper.wingT -= dt;
+    var target = Math.max(-0.5, Math.min(1.35, hopper.vy / 520));
+    hopper.rot += (target - hopper.rot) * Math.min(1, dt * 9);
+
+    var floor = H - GROUND_H - hopper.r + 2;
+    if (hopper.y > floor) { hopper.y = floor; if (state === STATE.PLAY) die(); hopper.vy = 0; }
+    if (hopper.y < -40 && state === STATE.PLAY) { hopper.y = -40; hopper.vy = 0; }
+
+    if (state !== STATE.PLAY) return;
+
+    // towers
+    spawnX -= scroll;
+    for (i = 0; i < towers.length; i++) towers[i].x -= scroll;
+    while (towers.length && towers[0].x + TOWER_W < -10) towers.shift();
+    while (spawnX < W + SPACING) spawnTower();
+
+    // difficulty
+    speed = Math.min(SPEED_MAX, SPEED_START + score * 3.2);
+    gap = Math.max(GAP_MIN, GAP_START - score * 1.1);
+
+    // score + collision
+    var hx = hopper.x, hy = hopper.y, hr = hopper.r - 2;
+    for (i = 0; i < towers.length; i++) {
+        var t = towers[i];
+        if (!t.passed && t.x + TOWER_W < hx) { t.passed = true; score++; sfx.score(); }
+        if (hx + hr > t.x && hx - hr < t.x + TOWER_W) {
+            var gapTop = t.gapY - t.gap / 2, gapBot = t.gapY + t.gap / 2;
+            if (hy - hr < gapTop || hy + hr > gapBot) { die(); break; }
+        }
+    }
+}
+
+/* ---------------- drawing ---------------- */
+function rr(x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
+
+function drawSky() {
+    var g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#1e3a6e");
+    g.addColorStop(0.55, "#4f8fd6");
+    g.addColorStop(1, "#a9d6f5");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, W, H);
+
+    // sun
+    ctx.fillStyle = "rgba(255, 236, 170, 0.9)";
+    ctx.beginPath(); ctx.arc(292, 96, 26, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255, 236, 170, 0.25)";
+    ctx.beginPath(); ctx.arc(292, 96, 40, 0, Math.PI * 2); ctx.fill();
+}
+
+function drawCloud(x, y, s, alpha) {
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "#ffffff";
+    ctx.translate(x, y); ctx.scale(s, s);
+    ctx.beginPath();
+    ctx.arc(0, 0, 22, 0, Math.PI * 2);
+    ctx.arc(24, -8, 26, 0, Math.PI * 2);
+    ctx.arc(52, 0, 20, 0, Math.PI * 2);
+    ctx.arc(26, 10, 24, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+}
+
+function drawHills() {
+    var base = H - GROUND_H;
+    ctx.fillStyle = "#3f7ab8";
+    for (var i = 0; i < hills.length; i++) {
+        var h = hills[i];
+        ctx.beginPath();
+        ctx.moveTo(h.x, base);
+        ctx.quadraticCurveTo(h.x + h.w / 2, base - h.h * 2, h.x + h.w, base);
+        ctx.closePath(); ctx.fill();
+    }
+}
+
+function drawTower(t) {
+    var x = t.x, top = t.gapY - t.gap / 2, bot = t.gapY + t.gap / 2;
+    var body = t.tint ? "#5b6b8c" : "#617296";
+    var light = t.tint ? "#8494b5" : "#8b9bc0";
+    var dark = t.tint ? "#3a4763" : "#414f6e";
+    var capH = 22;
+
+    function column(y0, y1, capAtBottom) {
+        // body
+        ctx.fillStyle = body; ctx.fillRect(x + 4, y0, TOWER_W - 8, y1 - y0);
+        ctx.fillStyle = light; ctx.fillRect(x + 4, y0, 10, y1 - y0);
+        ctx.fillStyle = dark; ctx.fillRect(x + TOWER_W - 16, y0, 12, y1 - y0);
+        // brick lines
+        ctx.strokeStyle = "rgba(0,0,0,0.12)"; ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (var yy = y0 + 18; yy < y1 - 4; yy += 26) { ctx.moveTo(x + 4, yy); ctx.lineTo(x + TOWER_W - 4, yy); }
+        ctx.stroke();
+        // cap
+        var cy = capAtBottom ? y1 - capH : y0;
+        ctx.fillStyle = dark; rr(x, cy, TOWER_W, capH, 5); ctx.fill();
+        ctx.fillStyle = light; ctx.fillRect(x + 3, cy + 3, TOWER_W - 6, 5);
+    }
+    column(-10, top, true);
+    column(bot, H - GROUND_H + 4, false);
+}
+
+function drawGround() {
+    var y = H - GROUND_H;
+    ctx.fillStyle = "#6ab04c"; ctx.fillRect(0, y, W, 14);
+    ctx.fillStyle = "#8fd36b";
+    for (var x = groundX - 48; x < W + 48; x += 48) { ctx.fillRect(x, y, 24, 6); }
+    ctx.fillStyle = "#c9a36b"; ctx.fillRect(0, y + 14, W, GROUND_H - 14);
+    ctx.fillStyle = "rgba(0,0,0,0.08)";
+    for (x = groundX - 48; x < W + 48; x += 48) { ctx.fillRect(x + 8, y + 26, 18, 6); ctx.fillRect(x + 30, y + 44, 12, 6); }
+}
+
+function drawHopper(h) {
+    ctx.save();
+    ctx.translate(h.x, h.y);
+    ctx.rotate(h.rot);
+
+    // tail
+    ctx.fillStyle = "#1f7a8c";
+    ctx.beginPath(); ctx.moveTo(-12, -2); ctx.lineTo(-24, -10); ctx.lineTo(-22, 4); ctx.closePath(); ctx.fill();
+
+    // body
+    ctx.fillStyle = "#2ec4b6";
+    ctx.beginPath(); ctx.arc(0, 0, h.r, 0, Math.PI * 2); ctx.fill();
+    // belly
+    ctx.fillStyle = "#e9fff9";
+    ctx.beginPath(); ctx.ellipse(2, 5, 9, 7, 0, 0, Math.PI * 2); ctx.fill();
+
+    // wing (flaps)
+    var up = h.wingT > 0;
+    ctx.fillStyle = "#1f7a8c";
+    ctx.beginPath();
+    if (up) ctx.ellipse(-3, -4, 10, 5, -0.7, 0, Math.PI * 2);
+    else ctx.ellipse(-3, 3, 10, 5, 0.5, 0, Math.PI * 2);
+    ctx.fill();
+
+    // goggles strap + lens
+    ctx.strokeStyle = "#3b2f2f"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(0, -3, h.r - 2, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+    ctx.fillStyle = "#3b2f2f";
+    ctx.beginPath(); ctx.arc(7, -4, 6.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffd166";
+    ctx.beginPath(); ctx.arc(7, -4, 4.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#3b2f2f";
+    ctx.beginPath(); ctx.arc(8.5, -4, 2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.arc(9.5, -5.5, 0.9, 0, Math.PI * 2); ctx.fill();
+
+    // beak
+    ctx.fillStyle = "#ff8c42";
+    ctx.beginPath(); ctx.moveTo(12, 1); ctx.lineTo(24, 4); ctx.lineTo(12, 8); ctx.closePath(); ctx.fill();
+
+    ctx.restore();
+}
+
+function text(str, x, y, size, color, align, weight, stroke) {
+    ctx.font = (weight || "800") + " " + size + "px -apple-system, 'Segoe UI', Roboto, Arial, sans-serif";
+    ctx.textAlign = align || "center";
+    ctx.textBaseline = "middle";
+    if (stroke !== false) {
+        ctx.lineWidth = Math.max(3, size / 6); ctx.lineJoin = "round";
+        ctx.strokeStyle = "rgba(20, 30, 60, 0.85)";
+        ctx.strokeText(str, x, y);
+    }
+    ctx.fillStyle = color || "#fff";
+    ctx.fillText(str, x, y);
+}
+
+function drawMute() {
+    ctx.save();
+    ctx.globalAlpha = 0.85;
+    ctx.fillStyle = "rgba(20,30,60,0.45)";
+    rr(W - 46, 10, 36, 36, 9); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath(); ctx.moveTo(W - 38, 24); ctx.lineTo(W - 32, 24); ctx.lineTo(W - 25, 18); ctx.lineTo(W - 25, 38); ctx.lineTo(W - 32, 32); ctx.lineTo(W - 38, 32); ctx.closePath(); ctx.fill();
+    if (muted) {
+        ctx.strokeStyle = "#ff6b6b"; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(W - 20, 22); ctx.lineTo(W - 12, 34); ctx.moveTo(W - 12, 22); ctx.lineTo(W - 20, 34); ctx.stroke();
+    } else {
+        ctx.strokeStyle = "#fff"; ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(W - 24, 28, 7, -0.9, 0.9); ctx.stroke();
+    }
+    ctx.restore();
+}
+
+function panel(x, y, w, h) {
+    ctx.fillStyle = "rgba(20, 30, 60, 0.88)";
+    rr(x, y, w, h, 16); ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.25)"; ctx.lineWidth = 2; ctx.stroke();
+}
+
+function draw() {
+    ctx.setTransform(dpr * scale, 0, 0, dpr * scale, 0, 0);
+    drawSky();
+    for (var i = 0; i < cloudsFar.length; i++) drawCloud(cloudsFar[i].x, cloudsFar[i].y, cloudsFar[i].s, 0.55);
+    drawHills();
+    for (i = 0; i < cloudsNear.length; i++) drawCloud(cloudsNear[i].x, cloudsNear[i].y, cloudsNear[i].s, 0.85);
+    for (i = 0; i < towers.length; i++) drawTower(towers[i]);
+    drawGround();
+    drawHopper(hopper);
+
+    if (state === STATE.PLAY) {
+        text(String(score), W / 2, 70, 52);
+    } else if (state === STATE.TITLE) {
+        text("SKYHOP", W / 2, H * 0.23, 58, "#ffd166");
+        text("by Parker Data Link", W / 2, H * 0.23 + 42, 16, "#e9f2ff", "center", "600");
+        var blink = (Math.floor(titleT * 2) % 2) === 0;
+        if (blink) text("TAP TO HOP", W / 2, H * 0.72, 26, "#fff");
+        text("Hop through the gaps.", W / 2, H * 0.72 + 38, 15, "#e9f2ff", "center", "600");
+        text("Don't touch the towers.", W / 2, H * 0.72 + 58, 15, "#e9f2ff", "center", "600");
+        if (best > 0) text("BEST " + best, W / 2, H * 0.23 + 90, 20, "#fff");
+    } else if (state === STATE.DEAD) {
+        var t = Math.min(1, (now() - deadAt) / 350);
+        var py = H * 0.26 - (1 - t) * 40;
+        ctx.save(); ctx.globalAlpha = t;
+        panel(40, py, W - 80, 230);
+        text("GAME OVER", W / 2, py + 40, 34, "#ff8c42");
+        text("SCORE", W / 2 - 70, py + 95, 14, "#cfe0ff", "center", "700");
+        text(String(score), W / 2 - 70, py + 128, 40);
+        text("BEST", W / 2 + 70, py + 95, 14, "#cfe0ff", "center", "700");
+        text(String(best), W / 2 + 70, py + 128, 40, newBest ? "#ffd166" : "#fff");
+        if (newBest) text("NEW BEST!", W / 2, py + 165, 18, "#ffd166");
+        text(medal(score), W / 2, py + 200, 15, "#e9f2ff", "center", "600");
+        ctx.restore();
+        if (now() - deadAt > 600 && (Math.floor(now() / 500) % 2) === 0) text("TAP TO TRY AGAIN", W / 2, H * 0.26 + 290, 22, "#fff");
+    }
+    drawMute();
+
+    if (paused) {
+        ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(0, 0, W, H);
+        text("PAUSED", W / 2, H / 2 - 20, 40);
+        text("TAP TO CONTINUE", W / 2, H / 2 + 30, 20);
+    }
+}
+
+function medal(s) {
+    if (s >= 50) return "Sky Legend";
+    if (s >= 30) return "Cloud Captain";
+    if (s >= 15) return "Tower Hopper";
+    if (s >= 5) return "Getting the hang of it";
+    return "Everyone starts somewhere";
+}
+
+/* pause / resume */
+canvas.addEventListener("pointerdown", function (e) {
+    if (paused) { paused = false; last = now(); e.stopImmediatePropagation(); }
+}, true);
+
+function loop() {
+    var t = now();
+    var dt = Math.min(0.033, (t - last) / 1000);
+    last = t;
+    if (!paused) update(dt);
+    draw();
+    requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* read-only debug hook (used by the automated play test) */
+window.__skyhop = { get: function () { return { state: state, score: score, best: best, y: hopper.y, vy: hopper.vy, towers: towers.map(function (t) { return { x: t.x, gapY: t.gapY, gap: t.gap }; }) }; }, flap: flap };
+
+/* service worker for the web version only */
+if ("serviceWorker" in navigator && !window.GameAds && location.protocol === "https:") {
+    navigator.serviceWorker.register("serviceworker.js").catch(function () {});
+}
+})();
+</script>
+</body>
+</html>

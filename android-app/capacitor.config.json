@@ -1,0 +1,9 @@
+{
+  "appId": "link.parkerdata.skyhop",
+  "appName": "Skyhop",
+  "webDir": "www",
+  "android": {
+    "allowMixedContent": false,
+    "backgroundColor": "#1b2a49"
+  }
+}

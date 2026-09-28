@@ -1,0 +1,14 @@
+node_modules/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+.DS_Store
+
+# Signing secrets - never commit
+keystore/
+android/keystore.properties
+*.keystore
+*.jks

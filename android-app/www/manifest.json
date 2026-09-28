@@ -1,0 +1,16 @@
+{
+  "name": "Skyhop by Parker Data Link",
+  "short_name": "Skyhop",
+  "description": "Tap to hop through the sky towers. One touch, endless tries.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "fullscreen",
+  "orientation": "portrait",
+  "background_color": "#1b2a49",
+  "theme_color": "#1b2a49",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Skyhop</string>
+    <string name="title_activity_main">Skyhop</string>
+    <string name="package_name">link.parkerdata.skyhop</string>
+    <string name="custom_url_scheme">link.parkerdata.skyhop</string>
+</resources>
